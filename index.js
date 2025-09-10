@@ -8,7 +8,7 @@ app.use(cors({ origin: true })); // Permite requisições do seu domínio Fireba
 app.use(express.json());
 
 // Inicializa o Firebase Admin
-const serviceAccount = require("./serviceAccountKey.json");
+const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
