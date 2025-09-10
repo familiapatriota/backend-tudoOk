@@ -1,0 +1,8 @@
+# Dependências
+node_modules
+
+# Chave de Serviço do Firebase (MUITO IMPORTANTE)
+serviceAccountKey.json
+
+# Arquivos de ambiente
+.env
