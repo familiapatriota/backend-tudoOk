@@ -1,4 +1,4 @@
-// Versão 3.0 do index.js (Backend com Busca Asaas integrada)
+// Versão 03 do index.js (Backend)
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -8,13 +8,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Inicializa o Firebase Admin a partir da variável de ambiente
 const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 const db = admin.firestore();
 
-// Middleware de segurança (não modificado)
+// Middleware de segurança para verificar a autenticação do usuário
 const checkAuth = async (req, res, next) => {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     const idToken = req.headers.authorization.split('Bearer ')[1];
@@ -22,7 +23,7 @@ const checkAuth = async (req, res, next) => {
       req.user = await admin.auth().verifyIdToken(idToken);
       next();
     } catch (error) {
-      console.error("Token inválido:", error);
+      console.error("Token inválido ou expirado:", error);
       res.status(401).send({ error: "Autenticação inválida." });
     }
   } else {
@@ -30,69 +31,93 @@ const checkAuth = async (req, res, next) => {
   }
 };
 
+// Rota de teste
 app.get("/", (req, res) => {
-  res.send("API v3.0 do TudoOkFaltandoFinanceiro está no ar!");
+  res.send("API v03 do TudoOkFaltandoFinanceiro está no ar!");
 });
 
-// Rota para criar o sócio, agora com a busca do Asaas integrada
+// Rota para obter as faturas do Asaas do usuário logado
+app.get("/getAsaasBills", checkAuth, async (req, res) => {
+    const uid = req.user.uid;
+    console.log(`Buscando faturas Asaas para o UID: ${uid}`);
+    try {
+        const userQuery = await db.collection("users").where("uid", "==", uid).limit(1).get();
+        if (userQuery.empty) {
+            return res.status(404).send({ error: "Registro de usuário não encontrado." });
+        }
+        
+        const asaasCustomerId = userQuery.docs[0].data().asaasCustomerId;
+        if (!asaasCustomerId) {
+            return res.status(200).send([]); // Retorna lista vazia se não tiver ID, não é um erro
+        }
+
+        const asaasApiKey = process.env.ASAAS_APIKEY;
+        if (!asaasApiKey) {
+            return res.status(500).send({ error: "Erro de configuração no servidor (Asaas)." });
+        }
+
+        const response = await axios.get(
+            `https://www.asaas.com/api/v3/payments?customer=${asaasCustomerId}`,
+            { headers: { access_token: asaasApiKey } }
+        );
+
+        const bills = response.data.data.map(bill => ({
+            dueDate: bill.dueDate,
+            value: bill.value,
+            status: bill.status === "CONFIRMED" || bill.status === "RECEIVED" ? "paga" : (bill.status === "OVERDUE" ? "vencida" : "pendente"),
+            paymentLink: bill.invoiceUrl,
+        }));
+        res.status(200).send(bills);
+    } catch (error) {
+        console.error("Erro ao buscar faturas Asaas:", error.message);
+        res.status(500).send({ error: "Falha ao buscar dados financeiros." });
+    }
+});
+
+// Rota para criar um novo sócio
 app.post("/criarSocio", checkAuth, async (req, res) => {
   const { nome, email, cpf, dob, telefone, endereco, planId } = req.body;
   const adminUid = req.user.uid;
-  console.log(`Admin ${adminUid} iniciando criação para ${email}`);
 
-  if (!planId || !nome || !email) {
-      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, plano) estão faltando." });
+  if (!planId || !nome || !email || !cpf) {
+      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, CPF, plano) estão faltando." });
   }
 
-  // --- Início da Integração Asaas ---
-  let asaasCustomerId = null; // Começa como nulo por padrão
-  const cleanCpf = cpf.replace(/\D/g, ''); // Garante que o CPF não tenha máscara
+  let asaasCustomerId = null;
+  const cleanCpf = cpf.replace(/\D/g, '');
 
-  if (cleanCpf) {
+  if (cleanCpf && process.env.ASAAS_APIKEY) {
       try {
-          console.log(`Buscando cliente Asaas com CPF: ${cleanCpf}`);
           const response = await axios.get(
               `https://www.asaas.com/api/v3/customers?cpfCnpj=${cleanCpf}`,
               { headers: { access_token: process.env.ASAAS_APIKEY } }
           );
-
-          if (response.data && response.data.data.length > 0) {
+          if (response.data?.data?.length > 0) {
               asaasCustomerId = response.data.data[0].id;
-              console.log(`Cliente Asaas encontrado: ${asaasCustomerId}`);
-          } else {
-              console.log("Nenhum cliente Asaas encontrado para este CPF. O campo ficará em branco.");
           }
       } catch (error) {
-          // Se der erro na API do Asaas, apenas registramos o erro e continuamos, sem parar a criação
-          console.error("Aviso: Falha ao comunicar com a API do Asaas. O campo asaasCustomerId ficará em branco. Erro:", error.response ? error.response.data : error.message);
+          console.error("Aviso: Falha ao comunicar com a API do Asaas:", error.message);
       }
   }
-  // --- Fim da Integração Asaas ---
 
   try {
-    // 1. Cria o usuário no Firebase Authentication
-    const userRecord = await admin.auth().createUser({
-        email: email,
-        displayName: nome,
-    });
+    const userRecord = await admin.auth().createUser({ email, displayName: nome });
     const novoSocioUid = userRecord.uid;
-    console.log(`Usuário criado no Authentication com UID: ${novoSocioUid}`);
 
-    // 2. Executa a transação para criar o documento no Firestore e atualizar o contador
     const counterRef = db.collection("counters").doc("passports");
-    const passportId = await db.runTransaction(async (transaction) => {
-      const counterDoc = await transaction.get(counterRef);
+    const passportId = await db.runTransaction(async (t) => {
+      const counterDoc = await t.get(counterRef);
       const nextId = (counterDoc.exists ? counterDoc.data().count : 0) + 1;
       const newPassportId = String(nextId).padStart(5, '0');
+      const newUserRef = db.collection("users").doc(newPassportId);
 
-      const dadosSocio = {
+      t.set(newUserRef, {
         uid: novoSocioUid,
-        asaasCustomerId: asaasCustomerId, // Salva o ID do Asaas (ou null se não encontrou)
+        asaasCustomerId,
         createdBy: adminUid,
         role: "Sócio",
         passportId: newPassportId,
-        planId: planId,
-        status: "ativo",
+        planId, status: "ativo",
         creationDate: admin.firestore.FieldValue.serverTimestamp(),
         financialResponsible_name: nome,
         financialResponsible_cpf: cpf,
@@ -100,24 +125,17 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
         financialResponsible_email: email,
         financialResponsible_phone: telefone,
         financialResponsible_address: endereco,
-      };
-
-      const newUserRef = db.collection("users").doc(newPassportId);
-      transaction.set(newUserRef, dadosSocio);
-      transaction.update(counterRef, { count: nextId });
-      
+      });
+      t.update(counterRef, { count: nextId });
       return newPassportId;
     });
 
-    console.log(`Sucesso! Passaporte ${passportId} e documento de usuário criados.`);
-    res.status(200).send({ status: "success", passportId: passportId });
-
+    res.status(200).send({ status: "success", passportId });
   } catch (error) {
     if (error.code === 'auth/email-already-exists') {
-        console.error("Tentativa de criar usuário com e-mail duplicado:", email);
         return res.status(409).send({ error: "Este e-mail já está cadastrado no sistema." });
     }
-    console.error("Falha na criação completa do sócio:", error);
+    console.error("Falha na criação do sócio:", error);
     res.status(500).send({ error: "Ocorreu um erro interno ao criar o sócio." });
   }
 });
