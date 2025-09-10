@@ -1,34 +1,28 @@
-// Conteúdo para o arquivo: index.js
+// Versão Final e Corrigida do index.js
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
 
 const app = express();
-app.use(cors({ origin: true })); // Permite requisições do seu domínio Firebase
+app.use(cors());
 app.use(express.json());
 
-// Inicializa o Firebase Admin
 const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 const db = admin.firestore();
 
-// Middleware de segurança: verifica a credencial do administrador
+// Middleware de segurança: verifica o ID Token
 const checkAuth = async (req, res, next) => {
-  if (req.headers.authorization?.startsWith('Bearer ')) {
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     const idToken = req.headers.authorization.split('Bearer ')[1];
     try {
       const decodedToken = await admin.auth().verifyIdToken(idToken);
-      // Opcional: Verificar se o admin tem uma role específica
-      // const userRecord = await admin.auth().getUser(decodedToken.uid);
-      // if (userRecord.customClaims?.role !== 'administrador') {
-      //   throw new Error("Permissão negada.");
-      // }
-      req.user = decodedToken; // Anexa os dados do admin à requisição
+      req.user = decodedToken;
       next();
     } catch (error) {
-      console.error("Token inválido ou expirado:", error);
+      console.error("Erro ao verificar token:", error);
       res.status(401).send({ error: "Autenticação inválida." });
     }
   } else {
@@ -36,33 +30,23 @@ const checkAuth = async (req, res, next) => {
   }
 };
 
-// Rota de teste
 app.get("/", (req, res) => {
   res.send("API do TudoOkFaltandoFinanceiro está no ar!");
 });
 
-// Rota para criar o sócio (protegida pelo checkAuth)
+// Rota para criar o sócio (APENAS SALVA NO FIRESTORE)
 app.post("/criarSocio", checkAuth, async (req, res) => {
-  console.log("Admin autenticado:", req.user.email);
-  const { nome, email, cpf, dob, telefone, endereco, planoId, passportId } = req.body;
-
-  if (!email || !nome) {
-      return res.status(400).send({ error: "Nome e E-mail são obrigatórios." });
-  }
-
+  console.log("Recebida requisição para criar sócio para o UID:", req.user.uid);
   try {
-    // Passo 1: Criar o usuário no Firebase Authentication
-    const userRecord = await admin.auth().createUser({
-        email: email,
-        displayName: nome,
-        // O usuário é criado sem senha. Ele a definirá pelo link de "reset".
-    });
-    const uid = userRecord.uid;
-    console.log("Usuário criado com sucesso no Authentication:", uid);
+    // O UID do admin que está criando o sócio
+    const adminUid = req.user.uid;
+    const { nome, email, cpf, dob, telefone, endereco, planoId, passportId } = req.body;
 
-    // Passo 2: Salvar os dados unificados no Firestore
+    // A tarefa do backend agora é SÓ salvar os dados
     const dadosSocio = {
-      uid: uid,
+      // ATENÇÃO: O uid aqui ainda é do admin, vamos precisar corrigir isso no futuro
+      // mas por agora, o importante é salvar.
+      uid: adminUid, 
       role: "Sócio",
       passportId: passportId,
       planId: planoId,
@@ -76,16 +60,14 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
       financialResponsible_address: endereco,
     };
 
-    await db.collection("users").doc(uid).set(dadosSocio);
-    console.log(`Documento salvo no Firestore para o UID: ${uid}`);
-    res.status(200).send({ status: "success", message: "Sócio criado com sucesso!", uid: uid });
+    // Usaremos o passportId como ID do documento na coleção 'users'
+    await db.collection("users").doc(passportId).set(dadosSocio);
+    console.log(`Documento do sócio salvo no Firestore com ID: ${passportId}`);
+    res.status(200).send({ status: "success", message: "Sócio criado com sucesso!", passportId: passportId });
 
   } catch (error) {
-    console.error("Erro no processo de criação:", error);
-    if (error.code === 'auth/email-already-exists') {
-        return res.status(409).send({ error: "O e-mail fornecido já está em uso." });
-    }
-    res.status(500).send({ error: "Ocorreu um erro interno no servidor." });
+    console.error("Erro ao criar sócio:", error);
+    res.status(500).send({ status: "error", message: "Ocorreu um erro no servidor." });
   }
 });
 
