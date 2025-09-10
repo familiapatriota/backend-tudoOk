@@ -1,4 +1,4 @@
-// Versão 03 do index.js (Backend)
+// Versão 04 do index.js (Backend)
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -33,7 +33,7 @@ const checkAuth = async (req, res, next) => {
 
 // Rota de teste
 app.get("/", (req, res) => {
-  res.send("API v03 do TudoOkFaltandoFinanceiro está no ar!");
+  res.send("API v04 do TudoOkFaltandoFinanceiro está no ar!");
 });
 
 // Rota para obter as faturas do Asaas do usuário logado
