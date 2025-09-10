@@ -1,4 +1,4 @@
-// Versão 04 do index.js (Backend)
+// Versão 05 do index.js (Backend)
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -33,7 +33,7 @@ const checkAuth = async (req, res, next) => {
 
 // Rota de teste
 app.get("/", (req, res) => {
-  res.send("API v04 do TudoOkFaltandoFinanceiro está no ar!");
+  res.send("API v05 do TudoOkFaltandoFinanceiro está no ar!");
 });
 
 // Rota para obter as faturas do Asaas do usuário logado
@@ -53,6 +53,7 @@ app.get("/getAsaasBills", checkAuth, async (req, res) => {
 
         const asaasApiKey = process.env.ASAAS_APIKEY;
         if (!asaasApiKey) {
+            console.error("ASAAS_APIKEY não configurada no servidor.");
             return res.status(500).send({ error: "Erro de configuração no servidor (Asaas)." });
         }
 
@@ -69,7 +70,7 @@ app.get("/getAsaasBills", checkAuth, async (req, res) => {
         }));
         res.status(200).send(bills);
     } catch (error) {
-        console.error("Erro ao buscar faturas Asaas:", error.message);
+        console.error("Erro ao buscar faturas Asaas:", error.response ? error.response.data : error.message);
         res.status(500).send({ error: "Falha ao buscar dados financeiros." });
     }
 });
@@ -96,7 +97,7 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
               asaasCustomerId = response.data.data[0].id;
           }
       } catch (error) {
-          console.error("Aviso: Falha ao comunicar com a API do Asaas:", error.message);
+          console.warn("Aviso: Falha ao comunicar com a API do Asaas. O cliente será criado sem o ID.", error.message);
       }
   }
 
@@ -109,7 +110,8 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
       const counterDoc = await t.get(counterRef);
       const nextId = (counterDoc.exists ? counterDoc.data().count : 0) + 1;
       const newPassportId = String(nextId).padStart(5, '0');
-      const newUserRef = db.collection("users").doc(newPassportId);
+      // O ID do documento agora é o UID do novo sócio, para facilitar buscas
+      const newUserRef = db.collection("users").doc(novoSocioUid);
 
       t.set(newUserRef, {
         uid: novoSocioUid,
