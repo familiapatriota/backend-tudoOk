@@ -1,27 +1,26 @@
-// Versão Definitiva do index.js (Backend)
+// Versão 2.0 do index.js (Backend com Automação)
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
+const axios = require("axios"); // Adicionamos o axios para chamadas de API
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Inicializa o Firebase Admin lendo as credenciais da variável de ambiente segura
 const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 const db = admin.firestore();
 
-// Middleware de segurança: Verifica se o usuário administrador está autenticado
+// Middleware de segurança (continua o mesmo)
 const checkAuth = async (req, res, next) => {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     const idToken = req.headers.authorization.split('Bearer ')[1];
     try {
-      // Verifica se a credencial (ID Token) é válida
       req.user = await admin.auth().verifyIdToken(idToken);
-      next(); // Se for válida, permite que a requisição continue
+      next();
     } catch (error) {
       console.error("Token inválido:", error);
       res.status(401).send({ error: "Autenticação inválida." });
@@ -31,35 +30,69 @@ const checkAuth = async (req, res, next) => {
   }
 };
 
-// Rota de teste para verificar se a API está no ar
 app.get("/", (req, res) => {
-  res.send("API do TudoOkFaltandoFinanceiro está no ar!");
+  res.send("API v2.0 do TudoOkFaltandoFinanceiro está no ar!");
 });
 
-// Rota final e segura para criar o sócio
+// NOVA ROTA: Buscar cliente no Asaas pelo CPF
+app.get("/buscarClienteAsaas", checkAuth, async (req, res) => {
+    const { cpf } = req.query;
+    if (!cpf) {
+        return res.status(400).send({ error: "CPF é obrigatório para a busca." });
+    }
+    try {
+        console.log(`Buscando cliente Asaas com CPF: ${cpf}`);
+        const response = await axios.get(
+            `https://www.asaas.com/api/v3/customers?cpfCnpj=${cpf}`,
+            { headers: { access_token: process.env.ASAAS_APIKEY } }
+        );
+
+        if (response.data && response.data.data.length > 0) {
+            const cliente = response.data.data[0];
+            console.log(`Cliente encontrado: ${cliente.id}`);
+            res.status(200).send({ asaasCustomerId: cliente.id });
+        } else {
+            console.log("Nenhum cliente encontrado para este CPF.");
+            res.status(404).send({ error: "Cliente não encontrado no Asaas." });
+        }
+    } catch (error) {
+        console.error("Erro ao buscar cliente no Asaas:", error.response ? error.response.data : error.message);
+        res.status(500).send({ error: "Falha ao comunicar com a API do Asaas." });
+    }
+});
+
+
+// ROTA ATUALIZADA: Criar o sócio, agora com criação de usuário no Auth
 app.post("/criarSocio", checkAuth, async (req, res) => {
-  const { nome, email, cpf, dob, telefone, endereco, planId } = req.body;
+  const { nome, email, cpf, dob, telefone, endereco, planId, asaasCustomerId } = req.body;
   const adminUid = req.user.uid;
-  console.log(`Admin ${adminUid} iniciando criação para o e-mail ${email}`);
-  
-  // Validação de segurança no backend para garantir que dados essenciais chegaram
-  if (!planId || !nome || !email) {
-      console.error("Erro: Requisição com dados faltando.", req.body);
-      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, plano) estão faltando." });
+  console.log(`Admin ${adminUid} iniciando criação completa para o e-mail ${email}`);
+
+  if (!planId || !nome || !email || !asaasCustomerId) {
+      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, plano, ID Asaas) estão faltando." });
   }
 
-  const counterRef = db.collection("counters").doc("passports");
-
   try {
-    // Executa a criação do contador e do usuário em uma única transação segura
+    // 1. Cria o usuário no Firebase Authentication PRIMEIRO
+    const userRecord = await admin.auth().createUser({
+        email: email,
+        displayName: nome,
+        // O usuário é criado sem senha. O admin envia o link de redefinição.
+    });
+    const novoSocioUid = userRecord.uid;
+    console.log(`Usuário criado no Authentication com UID: ${novoSocioUid}`);
+
+    // 2. Executa a transação para criar o documento no Firestore e atualizar o contador
+    const counterRef = db.collection("counters").doc("passports");
     const passportId = await db.runTransaction(async (transaction) => {
       const counterDoc = await transaction.get(counterRef);
       const nextId = (counterDoc.exists ? counterDoc.data().count : 0) + 1;
       const newPassportId = String(nextId).padStart(5, '0');
 
-      // Monta o objeto com os dados do novo sócio
       const dadosSocio = {
-        createdBy: adminUid, // Guarda quem foi o admin que criou o sócio
+        uid: novoSocioUid, // Usa o UID do NOVO SÓCIO
+        asaasCustomerId: asaasCustomerId, // Salva o ID do Asaas
+        createdBy: adminUid,
         role: "Sócio",
         passportId: newPassportId,
         planId: planId,
@@ -73,20 +106,23 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
         financialResponsible_address: endereco,
       };
 
-      // Define os documentos que serão criados/atualizados na transação
       const newUserRef = db.collection("users").doc(newPassportId);
       transaction.set(newUserRef, dadosSocio);
       transaction.update(counterRef, { count: nextId });
       
-      return newPassportId; // Retorna o ID do novo passaporte se a transação for bem-sucedida
+      return newPassportId;
     });
 
-    console.log(`Sucesso! Passaporte ${passportId} criado.`);
+    console.log(`Sucesso! Passaporte ${passportId} e documento de usuário criados.`);
     res.status(200).send({ status: "success", passportId: passportId });
 
   } catch (error) {
-    console.error("Falha na transação de criação de sócio:", error);
-    res.status(500).send({ error: "Ocorreu um erro interno ao salvar os dados." });
+    if (error.code === 'auth/email-already-exists') {
+        console.error("Tentativa de criar usuário com e-mail duplicado:", email);
+        return res.status(409).send({ error: "Este e-mail já está cadastrado no sistema." });
+    }
+    console.error("Falha na criação completa do sócio:", error);
+    res.status(500).send({ error: "Ocorreu um erro interno ao criar o sócio." });
   }
 });
 
