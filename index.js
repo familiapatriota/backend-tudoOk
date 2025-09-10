@@ -1,8 +1,8 @@
-// Versão 2.0 do index.js (Backend com Automação)
+// Versão 3.0 do index.js (Backend com Busca Asaas integrada)
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
-const axios = require("axios"); // Adicionamos o axios para chamadas de API
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
@@ -14,7 +14,7 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// Middleware de segurança (continua o mesmo)
+// Middleware de segurança (não modificado)
 const checkAuth = async (req, res, next) => {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     const idToken = req.headers.authorization.split('Bearer ')[1];
@@ -31,53 +31,49 @@ const checkAuth = async (req, res, next) => {
 };
 
 app.get("/", (req, res) => {
-  res.send("API v2.0 do TudoOkFaltandoFinanceiro está no ar!");
+  res.send("API v3.0 do TudoOkFaltandoFinanceiro está no ar!");
 });
 
-// NOVA ROTA: Buscar cliente no Asaas pelo CPF
-app.get("/buscarClienteAsaas", checkAuth, async (req, res) => {
-    const { cpf } = req.query;
-    if (!cpf) {
-        return res.status(400).send({ error: "CPF é obrigatório para a busca." });
-    }
-    try {
-        console.log(`Buscando cliente Asaas com CPF: ${cpf}`);
-        const response = await axios.get(
-            `https://www.asaas.com/api/v3/customers?cpfCnpj=${cpf}`,
-            { headers: { access_token: process.env.ASAAS_APIKEY } }
-        );
-
-        if (response.data && response.data.data.length > 0) {
-            const cliente = response.data.data[0];
-            console.log(`Cliente encontrado: ${cliente.id}`);
-            res.status(200).send({ asaasCustomerId: cliente.id });
-        } else {
-            console.log("Nenhum cliente encontrado para este CPF.");
-            res.status(404).send({ error: "Cliente não encontrado no Asaas." });
-        }
-    } catch (error) {
-        console.error("Erro ao buscar cliente no Asaas:", error.response ? error.response.data : error.message);
-        res.status(500).send({ error: "Falha ao comunicar com a API do Asaas." });
-    }
-});
-
-
-// ROTA ATUALIZADA: Criar o sócio, agora com criação de usuário no Auth
+// Rota para criar o sócio, agora com a busca do Asaas integrada
 app.post("/criarSocio", checkAuth, async (req, res) => {
-  const { nome, email, cpf, dob, telefone, endereco, planId, asaasCustomerId } = req.body;
+  const { nome, email, cpf, dob, telefone, endereco, planId } = req.body;
   const adminUid = req.user.uid;
-  console.log(`Admin ${adminUid} iniciando criação completa para o e-mail ${email}`);
+  console.log(`Admin ${adminUid} iniciando criação para ${email}`);
 
-  if (!planId || !nome || !email || !asaasCustomerId) {
-      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, plano, ID Asaas) estão faltando." });
+  if (!planId || !nome || !email) {
+      return res.status(400).send({ error: "Dados essenciais (nome, e-mail, plano) estão faltando." });
   }
 
+  // --- Início da Integração Asaas ---
+  let asaasCustomerId = null; // Começa como nulo por padrão
+  const cleanCpf = cpf.replace(/\D/g, ''); // Garante que o CPF não tenha máscara
+
+  if (cleanCpf) {
+      try {
+          console.log(`Buscando cliente Asaas com CPF: ${cleanCpf}`);
+          const response = await axios.get(
+              `https://www.asaas.com/api/v3/customers?cpfCnpj=${cleanCpf}`,
+              { headers: { access_token: process.env.ASAAS_APIKEY } }
+          );
+
+          if (response.data && response.data.data.length > 0) {
+              asaasCustomerId = response.data.data[0].id;
+              console.log(`Cliente Asaas encontrado: ${asaasCustomerId}`);
+          } else {
+              console.log("Nenhum cliente Asaas encontrado para este CPF. O campo ficará em branco.");
+          }
+      } catch (error) {
+          // Se der erro na API do Asaas, apenas registramos o erro e continuamos, sem parar a criação
+          console.error("Aviso: Falha ao comunicar com a API do Asaas. O campo asaasCustomerId ficará em branco. Erro:", error.response ? error.response.data : error.message);
+      }
+  }
+  // --- Fim da Integração Asaas ---
+
   try {
-    // 1. Cria o usuário no Firebase Authentication PRIMEIRO
+    // 1. Cria o usuário no Firebase Authentication
     const userRecord = await admin.auth().createUser({
         email: email,
         displayName: nome,
-        // O usuário é criado sem senha. O admin envia o link de redefinição.
     });
     const novoSocioUid = userRecord.uid;
     console.log(`Usuário criado no Authentication com UID: ${novoSocioUid}`);
@@ -90,8 +86,8 @@ app.post("/criarSocio", checkAuth, async (req, res) => {
       const newPassportId = String(nextId).padStart(5, '0');
 
       const dadosSocio = {
-        uid: novoSocioUid, // Usa o UID do NOVO SÓCIO
-        asaasCustomerId: asaasCustomerId, // Salva o ID do Asaas
+        uid: novoSocioUid,
+        asaasCustomerId: asaasCustomerId, // Salva o ID do Asaas (ou null se não encontrou)
         createdBy: adminUid,
         role: "Sócio",
         passportId: newPassportId,
